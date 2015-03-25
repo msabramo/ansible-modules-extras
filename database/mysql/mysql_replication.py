@@ -54,6 +54,12 @@ options:
         description:
             - mysql host to connect
         required: False
+    login_port:
+        description:
+            - Port of the MySQL server. Requires login_host be defined as other then localhost if login_port is used
+        required: False
+        default: 3306
+        version_added: "1.9"
     login_unix_socket:
         description:
             - unix socket to connect mysql server
@@ -115,6 +121,9 @@ EXAMPLES = '''
 
 # Change master to master server 192.168.1.1 and use binary log 'mysql-bin.000009' with position 4578
 - mysql_replication: mode=changemaster master_host=192.168.1.1 master_log_file=mysql-bin.000009 master_log_pos=4578
+
+# Check slave status using port 3308
+- mysql_replication: mode=getslave login_host=ansible.example.com login_port=3308
 '''
 
 import ConfigParser
@@ -159,9 +168,10 @@ def start_slave(cursor):
     return started
 
 
-def changemaster(cursor, chm):
-    SQLPARAM = ",".join(chm)
-    cursor.execute("CHANGE MASTER TO " + SQLPARAM)
+def changemaster(cursor, chm, chm_params):
+    sql_param = ",".join(chm)
+    query = 'CHANGE MASTER TO %s' % sql_param
+    cursor.execute(query, chm_params)
 
 
 def strip_quotes(s):
@@ -229,17 +239,18 @@ def main():
             login_user=dict(default=None),
             login_password=dict(default=None),
             login_host=dict(default="localhost"),
+            login_port=dict(default="3306"),
             login_unix_socket=dict(default=None),
             mode=dict(default="getslave", choices=["getmaster", "getslave", "changemaster", "stopslave", "startslave"]),
             master_host=dict(default=None),
             master_user=dict(default=None),
             master_password=dict(default=None),
-            master_port=dict(default=None),
-            master_connect_retry=dict(default=None),
+            master_port=dict(default=None, type='int'),
+            master_connect_retry=dict(default=None, type='int'),
             master_log_file=dict(default=None),
-            master_log_pos=dict(default=None),
+            master_log_pos=dict(default=None, type='int'),
             relay_log_file=dict(default=None),
-            relay_log_pos=dict(default=None),
+            relay_log_pos=dict(default=None, type='int'),
             master_ssl=dict(default=False, type='bool'),
             master_ssl_ca=dict(default=None),
             master_ssl_capath=dict(default=None),
@@ -251,6 +262,7 @@ def main():
     user = module.params["login_user"]
     password = module.params["login_password"]
     host = module.params["login_host"]
+    port = module.params["login_port"]
     mode = module.params["mode"]
     master_host = module.params["master_host"]
     master_user = module.params["master_user"]
@@ -292,8 +304,10 @@ def main():
     try:
         if module.params["login_unix_socket"]:
             db_connection = MySQLdb.connect(host=module.params["login_host"], unix_socket=module.params["login_unix_socket"], user=login_user, passwd=login_password)
+        elif module.params["login_port"] != "3306" and module.params["login_host"] == "localhost":
+            module.fail_json(msg="login_host is required when login_port is defined, login_host cannot be localhost when login_port is defined")
         else:
-            db_connection = MySQLdb.connect(host=module.params["login_host"], user=login_user, passwd=login_password)
+            db_connection = MySQLdb.connect(host=module.params["login_host"], port=int(module.params["login_port"]), user=login_user, passwd=login_password)
     except Exception, e:
         module.fail_json(msg="unable to connect to database, check login_user and login_password are correct or ~/.my.cnf has the credentials")
     try:
@@ -316,39 +330,53 @@ def main():
             module.fail_json(msg="Server is not configured as mysql slave")
 
     elif mode in "changemaster":
-        print "Change master"
         chm=[]
+        chm_params = {}
         if master_host:
-            chm.append("MASTER_HOST='" + master_host + "'")
+            chm.append("MASTER_HOST=%(master_host)s")
+            chm_params['master_host'] = master_host
         if master_user:
-            chm.append("MASTER_USER='" + master_user + "'")
+            chm.append("MASTER_USER=%(master_user)s")
+            chm_params['master_user'] = master_user
         if master_password:
-            chm.append("MASTER_PASSWORD='" + master_password + "'")
-        if master_port:
-            chm.append("MASTER_PORT=" + master_port)
-        if master_connect_retry:
-            chm.append("MASTER_CONNECT_RETRY='" + master_connect_retry + "'")
+            chm.append("MASTER_PASSWORD=%(master_password)s")
+            chm_params['master_password'] = master_password
+        if master_port is not None:
+            chm.append("MASTER_PORT=%(master_port)s")
+            chm_params['master_port'] = master_port
+        if master_connect_retry is not None:
+            chm.append("MASTER_CONNECT_RETRY=%(master_connect_retry)s")
+            chm_params['master_connect_retry'] = master_connect_retry
         if master_log_file:
-            chm.append("MASTER_LOG_FILE='" + master_log_file + "'")
-        if master_log_pos:
-            chm.append("MASTER_LOG_POS=" + master_log_pos)
+            chm.append("MASTER_LOG_FILE=%(master_log_file)s")
+            chm_params['master_log_file'] = master_log_file
+        if master_log_pos is not None:
+            chm.append("MASTER_LOG_POS=%(master_log_pos)s")
+            chm_params['master_log_pos'] = master_log_pos
         if relay_log_file:
-            chm.append("RELAY_LOG_FILE='" + relay_log_file + "'")
-        if relay_log_pos:
-            chm.append("RELAY_LOG_POS=" + relay_log_pos)
+            chm.append("RELAY_LOG_FILE=%(relay_log_file)s")
+            chm_params['relay_log_file'] = relay_log_file
+        if relay_log_pos is not None:
+            chm.append("RELAY_LOG_POS=%(relay_log_pos)s")
+            chm_params['relay_log_pos'] = relay_log_pos
         if master_ssl:
             chm.append("MASTER_SSL=1")
         if master_ssl_ca:
-            chm.append("MASTER_SSL_CA='" + master_ssl_ca + "'")
+            chm.append("MASTER_SSL_CA=%(master_ssl_ca)s")
+            chm_params['master_ssl_ca'] = master_ssl_ca
         if master_ssl_capath:
-            chm.append("MASTER_SSL_CAPATH='" + master_ssl_capath + "'")
+            chm.append("MASTER_SSL_CAPATH=%(master_ssl_capath)s")
+            chm_params['master_ssl_capath'] = master_ssl_capath
         if master_ssl_cert:
-            chm.append("MASTER_SSL_CERT='" + master_ssl_cert + "'")
+            chm.append("MASTER_SSL_CERT=%(master_ssl_cert)s")
+            chm_params['master_ssl_cert'] = master_ssl_cert
         if master_ssl_key:
-            chm.append("MASTER_SSL_KEY='" + master_ssl_key + "'")
+            chm.append("MASTER_SSL_KEY=%(master_ssl_key)s")
+            chm_params['master_ssl_key'] = master_ssl_key
         if master_ssl_cipher:
-            chm.append("MASTER_SSL_CIPHER='" + master_ssl_cipher + "'")
-        changemaster(cursor,chm)
+            chm.append("MASTER_SSL_CIPHER=%(master_ssl_cipher)s")
+            chm_params['master_ssl_cipher'] = master_ssl_cipher
+        changemaster(cursor, chm, chm_params)
         module.exit_json(changed=True)
     elif mode in "startslave":
         started = start_slave(cursor)
